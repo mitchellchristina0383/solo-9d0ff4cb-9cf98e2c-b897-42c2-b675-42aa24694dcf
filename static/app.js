@@ -104,7 +104,8 @@
     var ss = lane.server_session;
     $("retry-server-" + id).textContent = ss
       ? ss.retransmit_count + " 次（超时 " + ss.timeout_retransmits +
-        " / 重复RRQ " + ss.duplicate_rrq_resends + "）"
+        " / 重复RRQ " + ss.duplicate_rrq_resends + "）" +
+        (lane.server_session_frozen ? " · 终值" : "")
       : (lane.status === "done" || lane.status === "error" ? "未匹配" : "—");
 
     var badge = $("digest-badge-" + id);

@@ -46,11 +46,13 @@ def _now_iso() -> str:
 class Session:
     """一个客户端 (ip, port) 的一次读传输。所有访问都在 server.lock 下。"""
 
-    def __init__(self, addr: Addr, filename: str, mode: str, tid_port: int):
+    def __init__(self, addr: Addr, filename: str, mode: str, tid_port: int,
+                 seq: int):
         self.addr = addr
         self.filename = filename
         self.mode = mode
         self.tid_port = tid_port
+        self.seq = seq                # 服务进程内单调递增的会话序号
 
         self.block = 1                 # 当前“待确认”块号
         self.retries_done = 0         # 已发生的超时重传次数
@@ -111,6 +113,7 @@ class Session:
 
     def snapshot(self, now_mono: float) -> dict:
         return {
+            "seq": self.seq,
             "client_ip": self.addr[0],
             "client_port": self.addr[1],
             "client": f"{self.addr[0]}:{self.addr[1]}",
@@ -134,6 +137,8 @@ class Session:
             "duplicate_rrq_resends": self.duplicate_rrq_resends,
             "late_acks": self.late_acks,
             "started_at": time.strftime("%H:%M:%S", time.localtime(self.initial_wall)),
+            "started_ts": self.initial_wall,
+            "finished_ts": self.finished_wall,
             "duration_ms": self.duration_ms,
             "events": list(self.events),
         }
@@ -152,6 +157,7 @@ class TFTPServer:
         self.lock = threading.RLock()
         self.sessions: Dict[Addr, Session] = {}
         self.history: Deque[dict] = deque(maxlen=30)
+        self._seq = 0                 # 会话序号：只增不减，供网页按“本轮”对账
 
         self.total_started = 0
         self.total_completed = 0
@@ -330,7 +336,9 @@ class TFTPServer:
             print(f"[tftp] REJECT(mode={mode}) {addr}", flush=True)
             return
 
-        sess = Session(addr, filename or fw.IMAGE_NAME, mode, self.bound_port)
+        sess = Session(addr, filename or fw.IMAGE_NAME, mode, self.bound_port,
+                       self._seq + 1)
+        self._seq += 1
         self.sessions[addr] = sess
         self.total_started += 1
         sess.send_current(self.sock, cause="initial")
