@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TFTP 丢包重传试跑台 · 旧交换机割接前验证</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <h1>TFTP 丢包重传试跑台</h1>
+    <p class="sub">
+      模拟网管维修旧交换机前的固件取回验证：只读 <code>octet</code>，每块
+      <code>{{ block_size }}</code> 字节，内置样例镜像
+      <code>{{ image_name }}</code>（{{ image_size }} 字节）。
+      测试终端与 TFTP 服务之间走<strong>真实 UDP 报文</strong>。
+    </p>
+    <div class="meta-grid">
+      <div><span>镜像</span><code>{{ image_name }}</code></div>
+      <div><span>长度</span><code>{{ image_size }} B</code></div>
+      <div class="sha"><span>SHA-256</span><code id="expected-sha" title="内置镜像摘要">{{ image_sha }}</code></div>
+      <div><span>TFTP 目标</span><code>{{ tftp_target }}</code></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="actionbar card">
+    <div class="modes-pick">
+      <label class="pick">
+        <input type="radio" name="quick-mode" value="lose-first">
+        <span>两路都：丢首次首块一次</span>
+      </label>
+      <label class="pick">
+        <input type="radio" name="quick-mode" value="normal">
+        <span>两路都：正常确认不丢包</span>
+      </label>
+      <label class="pick">
+        <input type="radio" name="quick-mode" value="split" checked>
+        <span>A 丢首块 / B 正常（推荐对照）</span>
+      </label>
+    </div>
+    <button id="btn-start-both" class="btn primary">⚡ 同时发起两路下载</button>
+    <span id="both-hint" class="hint">两路用栅栏同时发出 RRQ，服务端最多接收 2 路。</span>
+  </section>
+
+  <section class="lanes">
+    {% for lane in ['A', 'B'] %}
+    <article class="card lane" id="lane-{{ lane }}">
+      <div class="lane-head">
+        <h2>下载链路 {{ lane }}</h2>
+        <span class="status-pill idle" id="status-{{ lane }}">待开始</span>
+      </div>
+
+      <div class="lane-controls">
+        <label class="pick small">
+          <input type="radio" name="mode-{{ lane }}" value="normal"
+                 {% if lane == 'B' %}checked{% endif %}>
+          <span>正常逐块确认</span>
+        </label>
+        <label class="pick small">
+          <input type="radio" name="mode-{{ lane }}" value="lose-first"
+                 {% if lane == 'A' %}checked{% endif %}>
+          <span>首块丢弃一次（不回 ACK，等重传）</span>
+        </label>
+        <button class="btn ghost small-btn" data-lane="{{ lane }}">仅启动本路</button>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <em>耗时</em><strong id="elapsed-{{ lane }}">—</strong>
+        </div>
+        <div class="metric">
+          <em>收到数据</em><strong id="bytes-{{ lane }}">—</strong>
+        </div>
+        <div class="metric">
+          <em>空结束块</em><strong id="term-{{ lane }}">—</strong>
+        </div>
+        <div class="metric warn">
+          <em>重传次数（终端观测）</em><strong id="retry-client-{{ lane }}">—</strong>
+        </div>
+        <div class="metric warn">
+          <em>重传次数（服务端计数）</em><strong id="retry-server-{{ lane }}">—</strong>
+        </div>
+      </div>
+
+      <div class="digest" id="digest-box-{{ lane }}">
+        <div class="digest-row">
+          <span>摘要校验 SHA-256</span>
+          <strong class="badge" id="digest-badge-{{ lane }}">未校验</strong>
+        </div>
+        <code class="digest-hex" id="digest-actual-{{ lane }}">—</code>
+        <div class="subinfo" id="addr-{{ lane }}"></div>
+      </div>
+
+      <details class="logbox" open>
+        <summary>报文事件流水</summary>
+        <ul class="log" id="log-{{ lane }}"><li class="muted">尚未运行。</li></ul>
+      </details>
+    </article>
+    {% endfor %}
+  </section>
+
+  <section class="card server-panel">
+    <div class="panel-head">
+      <h2>TFTP 服务端名额 / 重传状态</h2>
+      <div class="slots" id="slots-view">
+        <span class="slot-dot" data-slot="0"></span>
+        <span class="slot-dot" data-slot="1"></span>
+        <strong id="slots-text">—/2</strong>
+      </div>
+      <button class="btn ghost" id="btn-refresh-stats">立即刷新</button>
+    </div>
+    <p class="hint" id="server-meta">正在读取服务端 stats …</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+        <tr>
+          <th>客户端 (源 IP:端口)</th><th>服务端口(TID)</th><th>状态</th>
+          <th>当前待确认块</th><th>距原超时点</th>
+          <th>超时重传</th><th>重复RRQ补发</th><th>迟到ACK</th>
+        </tr>
+        </thead>
+        <tbody id="sessions-body">
+        <tr><td colspan="8" class="muted">暂无活动会话</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint" id="totals-line"></p>
+  </section>
+
+  <section class="card fulltest">
+    <div class="panel-head">
+      <h2>满载拒绝 · 名额归还自检</h2>
+      <button class="btn" id="btn-fulltest">🧪 从网页执行：占满 2 路 → 第三路应被拒绝 → 超时归还后可再下载</button>
+    </div>
+    <div id="fulltest-summary" class="hint">
+      该自检会真实占用两个名额且不确认，约需数秒等待服务端最后一次重试超时。
+    </div>
+    <ul class="log" id="fulltest-log"></ul>
+  </section>
+
+  <section class="card doc">
+    <h2>判定说明</h2>
+    <ul>
+      <li><strong>丢包重传：</strong>选择“首块丢弃一次”后，终端第一次收到 DATA block=1 时不确认；
+        服务端在原超时点重传 block=1，终端第二次收到后确认，两路计数都应为 <code>1</code>。</li>
+      <li><strong>整数倍镜像结束条件：</strong>1024 = 2×512，服务端发完 block=2 后还要发空的 block=3，
+        收到 ACK(3) 才置为 completed 并归还名额。</li>
+      <li><strong>名额语义：</strong>同一源 IP:端口重复 RRQ 只补发待确认块、沿用原超时点且不占新名额；
+        只有当前块号的 ACK 能推进；迟到 ACK 被忽略。</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="foot wrap">
+  <span>TFTP demo · Flask + 标准库 UDP · docker compose up --build 后访问 http://localhost:8080</span>
+</footer>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

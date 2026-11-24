@@ -1,0 +1,43 @@
+services:
+  tftp:
+    build: .
+    image: tftp-demo:latest
+    command: ["python", "-u", "server.py"]
+    environment:
+      TFTP_HOST: "0.0.0.0"
+      TFTP_PORT: "69"
+      STATS_HOST: "0.0.0.0"
+      STATS_PORT: "8001"
+      # 试跑环境下调到 1s，丢首块的链路约 1s 即可看到重传
+      TFTP_TIMEOUT: "1.0"
+      TFTP_MAX_RETRIES: "4"
+    ports:
+      # 标准 TFTP 端口（宿主机 UDP 69）
+      - "69:69/udp"
+      # 高位端口，方便非 root 脚本/避免与本机服务冲突
+      - "6969:69/udp"
+      # 服务端名额/重传统计 JSON
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=2).status==200 else 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 6
+
+  web:
+    build: .
+    image: tftp-demo:latest
+    command: ["python", "-u", "web.py"]
+    environment:
+      # 容器网络内通过 compose 服务名访问 TFTP，全程真实 UDP
+      TFTP_HOST: "tftp"
+      TFTP_PORT: "69"
+      STATS_URL: "http://tftp:8001/stats"
+      TFTP_AUTOSTART: "0"
+      WEB_HOST: "0.0.0.0"
+      WEB_PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - tftp
